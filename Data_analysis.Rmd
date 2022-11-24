@@ -1,0 +1,402 @@
+---
+title: "Meal preparation data analysis"
+author: "Charilaos Charalampopoulos"
+date: "24/11/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Problem Definition
+A food delivery company is committed to providing a delivery experience that delights their customers while still being incredibly efficient. Thus it is critical that they have the best possible model of how long it takes for a food order to be prepared. This allows them to ensure that a rider arrives at a restaurant to pick up an order exactly when the food is ready. 
+The aim of this exercise is to use historical data, clean it, manipulate it to extract insights, then finally predict the food preparation time for each order.
+
+# About this report
+The aim of this notebook is to show the process we followed by describing the steps and elaborating a bit more on the visuals alongside with the code that generates them. It is not what we would present to the stakeholder or to non-technical audience. A presentation that you will find in the github repo is dedicated to non technical audience and showcases my storytelling.
+
+# Process outline
+#### Import data and load libraries
+* Join the two datasets and name it 'orders' using restaurant_id as a key
+* Remove duplicates if any
+
+#### Data exploration and feature creation
+* Create time features to facilitate the analysis and convert data types appropriately
+* Summary statistics 
+* Assumptions based on the initial findings
+
+#### Outliers treatment
+* Examining extreme or abnormal values
+* Treat them appropriately
+
+#### Data analysis - Visualization
+* Visualize distributions (Univariate)
+* Countries - cities
+* Restaurants
+* Type of food 
+* Day of the week
+* Hour of the day
+* Orders over time
+* Linear relationships
+
+#### Coclusions and things I would do with more time
+
+## Install and load libraries
+```{r, message = F, warning = F}
+# install.packages('tidyverse')
+# install.packages('skimr')
+# install.packages('lubridate')
+# install.packages('cowplot')
+# install.packages('plotly')
+# install.packages('GGally')
+library(tidyverse) # General purpose
+library(skimr)     # EDA    
+library(lubridate) # Dates manipulation
+library(cowplot)   # Plot multiple plots
+library(plotly)    # Interancive plots
+library(GGally)    # Pairplot
+```
+
+### Load data and check how the datasets look like
+```{r}
+# Load data
+orders <- read.csv('orders.csv')
+restaurants <- read.csv('restaurants.csv')
+# Structure of the datasets
+str(orders)
+str(restaurants)
+```
+It seems that we have 32,394 observations and 6 variables in orders dataset whereas the restaurant dataset has 1,697 rows and 4 columns.
+By checking that restaurant_id is the unique identifier for the two datasets we can join them together. This way we can have the order's information along with the country, the city and the type of food of the restaurant. 
+
+### Join data, remove potential duplications and create useful features
+```{r, message = F, warning = F}
+# Inner join the data to retrieve all the info we need from both the given tables - remove duplicates
+orders <- orders %>% inner_join(restaurants, 'restaurant_id') %>% unique()
+
+# Create features to facilitate EDA
+orders <- orders %>%
+  mutate(prep_time_minutes = prep_time_seconds/60,          # Preparation time in minutes
+         prep_time_hours = prep_time_seconds/3600,          # Preparation time in hours
+         order_placed_at = strptime(order_acknowledged_at,  # Conversion into timestamp in GMT (UK time)
+                                    "%Y-%m-%d %H:%M:%S", 
+                                    tz = "gmt"),
+         order_ready_at = strptime(order_ready_at,          # Conversion into timestamp in GMT (UK time)
+                                   "%Y-%m-%d %H:%M:%S", 
+                                   tz = "gmt"),
+         restaurant_id = as.factor(restaurant_id),          # Change data type from character to factor
+         country = as.factor(country),                      # Change data type from character to factor
+         city = as.factor(city),                            # Change data type from character to factor
+         type_of_food = as.factor(type_of_food),            # Change data type from character to factor
+         date_of_order = date(order_placed_at),             # Date that the order was acknowledged 
+         date_order_prepared = date(order_ready_at),        # Date that the order was acknowledged 
+         day_name = lubridate::wday(date_of_order, label = TRUE), # Name of the day the order has been placed
+         hour_of_the_day = as.factor(hour(order_placed_at)) # Hour of the day where the order has been placed
+  ) %>%
+  select(-order_acknowledged_at, -order_ready_at)           # Remove those two columns as they are not needed
+         
+# Use skim function to gain more info regarding missing values and high level statistics
+skim(orders)
+```
+### Summary statistics
+* It seems that the dataset that we have created has no missing values (check n_missing or complete_rate for each skim_variable).
+* Looking at the date skim variable we see that we have data from 2015-06-01 to	2015-07-01 (1 month worth of data)
+* The dataset has orders from 4 countries, 22 cities and 83 different types of food (restaurant types)
+* The average cost of orders is about 26.5 GBP with a standard deviation of around 19. The median cost is less than the mean (21.4 GBP) and the max is 711 indicating the existence of outliers/extreme values and a right skewed distribution  
+* It seems that on average the number of items in an order is about 4 items and the maximum number of items in an order is 38. 
+* Combined numbers(seconds-minutes-hours): The min preparation time lasted 0 seconds which is something that we should look at whereas the maximum lasted 255,499 seconds (around 71 hours ~ 3 days). On average it takes around 22 minutes / 0.36 hours for an order to get prepared with the median pred time in hours to be around 14 minutes / 0.23 hours - Indication for a skewed distribution 
+
+
+### Assumptions
+* All the 4 countries are in the same timezone even if there aren't (may have one hour difference)
+* The transactions are in the same currency (GBP)
+* Orders are not only placed for a same day delivery - Example: Not clear if 71 hours preparation is because of big volume of items, will of the client to have a next day(s) delivery, or mistake in the data. For the purposes of this analysis those extreme values will be removed (This needs a proper analysis which would happen if I had more time - performing outlier detection to understand if those extreme values are plausible in the business context or there are typos/erroneous data or even to examine if those cases should be treated differently)
+
+## Data analysis
+
+### Can a restaurant have more than one type of food? -> NO
+```{r, message = F, warning = F}
+# Check if the number of rows of the above are the same 
+# In case they are it means that each restaurant has only one type of food
+dim(orders %>% count(restaurant_id, type_of_food))[1] == dim(restaurants)[1] # Same number of rows
+```
+```{r, message = F, warning = F }
+#orders %>% filter(prep_time_hours > 0.34 + 1.5 * IQR(orders$prep_time_hours)) %>% arrange(desc(prep_time_hours))
+```
+
+### Orders that were placed in previous day
+There are obviously cases that the order happened late at night and it was delivered very early next day (for example order at 11pm and delivery next day at 1 am) which sounds like a normal scenario but it seems that there are also cases that the order happened a day or a few days in advance. In order to distinguish between the orders mentioned above let's create a flag indicating when an order is set for delivery next day(s) excluding the cases where the order just took place very late at night and was delivered within 3 hours (this number is taken as a reasonable but a bit high value to cover a big range or orders in this business context).
+```{r, message = F, warning = F}
+# Remove the 103 observations that have 0 prep time
+# Create a flag to differentiate between the above-mentioned orders
+orders <- orders %>%
+  filter(prep_time_seconds != 0) %>%
+  mutate(flag_diff_day = ifelse(date_of_order != date_order_prepared & prep_time_hours > 3, 
+                                'Next_day_order', 
+                                'Same_day_order'))
+# Statistics about those categories
+orders %>% 
+  group_by(flag_diff_day) %>% 
+  summarise(counts = n(), 
+            average_prep_time = mean(prep_time_hours), 
+            min_prep_time = min(prep_time_hours),
+            max_prep_time = max(prep_time_hours))
+```
+
+Same day orders have a maximum prep time of a bit more than 10 hours which can be a valid thought to order at morning or noon for dinner to be delivered at night. The average prep time of the same day orders is about half an hour.
+For the modeling purposes and for better visualization those 74 'abnormal' observations as the table above shows will be deleted. (Normally, we would perform proper outlier analysis to understand what is going on with them and if they should not been removed. Potentially a different model could be created for those cases).
+In the graph above, with red color are represented the 'next day' orders which will be removed for the purposes of this analysis, and with blue color the order that the analysis is based on. On the x-axis there is the cost of the order and on the y-axis we have the preparation time in hours. This plot shows the relationship of the two. On later stage we will examine in more detail.
+
+```{r, message = F, warning = F}
+# Plot order price vs preparation time to visualize extreme values
+# Interactive plot
+ggplotly(orders %>% 
+  ggplot(aes(x = order_value_gbp, y = prep_time_hours, color = flag_diff_day)) + 
+  geom_point(alpha = 0.7) +
+  labs(title = 'Order price vs preparation time to understand outliers', 
+       x = 'Order cost', y = 'Preparation time in hours'))
+```
+
+### Remove next day deliveries
+```{r}
+# Remove next day deliveries
+orders <- orders %>% filter(flag_diff_day == 'Same_day_order')
+```
+
+### Distributions and Frequency plots
+```{r, message = F, warning = F}
+# Distribution of number of items
+plt1 <- ggplot(orders, aes(x = number_of_items)) + geom_histogram(bins = 50, fill = 'steelblue') + 
+        labs(x = '', y = 'Frequency', title = 'Distribution of order items')
+plt2 <- ggplot(orders, aes(x = number_of_items)) + geom_boxplot(fill = 'steelblue') + 
+        labs(x = 'Number of items') +
+        theme(axis.text.y = element_blank(), axis.ticks.y = element_blank())
+cowplot::plot_grid(plt1, plt2, 
+                   ncol = 1, rel_heights = c(2, 1),
+                   align = 'v', axis = 'lr') 
+# Distribution of order costs
+plt3 <- ggplot(orders, aes(x = order_value_gbp)) + geom_histogram(bins = 500, fill = 'steelblue') + 
+        labs(x = '', y = 'Frequency', title = 'Distribution of order costs') 
+plt4 <- ggplot(orders, aes(x = order_value_gbp)) + geom_boxplot(fill = 'steelblue') + 
+        labs(x = 'Order cost in GBP') +
+        theme(axis.text.y = element_blank(), axis.ticks.y = element_blank())
+cowplot::plot_grid(plt3, plt4, 
+                   ncol = 1, rel_heights = c(2, 1),
+                   align = 'v', axis = 'lr') 
+# Distribution of preparation time
+plt5 <- ggplot(orders, aes(x = prep_time_hours)) + geom_histogram(bins = 500, fill = 'steelblue') + 
+        labs(x = '', y = 'Frequency', title = 'Distribution of preparation time (in hours)') 
+plt6 <- ggplot(orders, aes(x = prep_time_hours)) + geom_boxplot(fill = 'steelblue') + 
+        labs(x = 'Preparation time in hours') +
+        theme(axis.text.y = element_blank(), axis.ticks.y = element_blank())
+cowplot::plot_grid(plt5, plt6, 
+                   ncol = 1, rel_heights = c(2, 1),
+                   align = 'v', axis = 'lr') 
+```
+
+All the three plots show right skewed distributions. Order prices and number of items in the orders will be predictors in our models and the fact that follow this kind of distributions will make our life a bit more difficult. However, by normalizing them we can overcome potential issues. The outlier removal helped our visuals as if we kept the 74 observations of next day delivery we would notice heavily skewed distributions.
+Due to skewed distributions the main metric we proceed with this analysis will be the median (median is the point above and below which half (50%) the observed data falls)
+
+#### ***Note that you can hover over the graphs to see the values below
+
+### What is the country/city with the most orders?
+The vast majority of orders come from London with more than 25k of orders. Second highest amount of orders is Paris with around 2 thousands orders which seems to be the only city represented by France. The other two countries are Germany(Berlin and Munchen) and Ireland(Dublin).
+```{r, message = F, warning = F}
+# Plot the amount of orders by city color-coded by country
+ggplotly(orders %>% 
+  group_by(country, city) %>% 
+  summarise(counts = n()) %>%
+  mutate(total = sum(counts), perc = round(counts/total, 2)) %>% 
+  arrange(desc(counts)) %>% 
+  ggplot(aes(x = fct_reorder(city, counts), y = counts, fill = country)) + 
+  geom_col() + 
+  coord_flip() + 
+  labs(x = 'City', y = 'Number of orders', title = 'Number of orders by city'))
+```
+
+### What are the restaurants with the most orders?
+```{r, message = F, warning = F}
+ggplotly(orders %>% 
+  group_by(restaurant_id, type_of_food) %>%
+  summarise(number_of_orders = n()) %>% 
+  arrange(desc(number_of_orders)) %>%
+  head(30) %>%
+  ggplot(aes(x = fct_reorder(restaurant_id, number_of_orders), y = number_of_orders)) +
+  geom_col() +
+  coord_flip() +
+  labs(x = 'Restaurant id',
+       y = 'Number of orders',
+       title = 'Top 30 restaurants based on order frequency'))
+```
+
+### What are the restaurants with the slowest median preparation?
+```{r, message = F, warning = F}
+ggplotly(orders %>% 
+  group_by(restaurant_id, type_of_food) %>%
+  summarise(median_prep_time = median(prep_time_hours), n = n()) %>%
+  arrange(desc(median_prep_time)) %>%
+  head(30) %>%
+  ggplot(aes(x = fct_reorder(restaurant_id, median_prep_time), y = median_prep_time)) +
+  geom_col(fill = 'darkred') +
+  coord_flip() +
+  labs(x = 'Restaurant id',
+       y = 'Median preparation time in hours',
+       title = 'Top 30 slowest restaurants based on median preparation time in hours'))
+```
+
+### What is the most frequent food type order?
+```{r, message = F, warning = F}
+ggplotly(orders %>% 
+  group_by(type_of_food) %>% 
+  summarise(counts = n()) %>% 
+  arrange(desc(counts)) %>%
+  head(30) %>%
+  ggplot(aes(x = fct_reorder(type_of_food, counts), y = counts)) + 
+  geom_col(fill = 'darkgreen') + 
+  coord_flip() + 
+  labs(x = 'Type of food',
+       y = 'Number of orders',
+       title = 'Top 30 food types based on number of orders'))
+```
+
+Italian food seems to be the most prominent type of food that people order, followed by burgers and thai.
+It may happen that a lot of food types may overlap but assuming that the restaurant labeling is right we can proceed.
+
+### What is the fastest and slowest median preparation time by type of food
+```{r, message = F, warning = F}
+cowplot::plot_grid( 
+  orders %>% 
+  group_by(type_of_food) %>%
+  summarise(median_prep_time = median(prep_time_hours)) %>% 
+  arrange(median_prep_time) %>%
+  head(10) %>%
+  ggplot(aes(x = fct_reorder(type_of_food, -median_prep_time), y = median_prep_time)) +
+  geom_col(fill = 'steelblue') +
+  coord_flip() +
+  labs(x = 'Food type',
+       y = 'Median preparation time',
+       title = 'Top 10 fastest median prep time by food type'),
+  orders %>% 
+  group_by(type_of_food) %>%
+  summarise(median_prep_time = mean(prep_time_hours)) %>% 
+  arrange(desc(median_prep_time)) %>%
+  head(10) %>%
+  ggplot(aes(x = fct_reorder(type_of_food, median_prep_time), y = median_prep_time)) +
+  geom_col(fill = 'darkred') +
+  coord_flip() +
+  labs(x = 'Food type',
+        y = 'Median preparation time',
+       title = 'Top 10 slowest median prep time by food type'),
+  ncol = 1,  align = 'v', axis = 'lr') 
+```
+
+```{r, message = F, warning = F, include = FALSE}
+orders %>% select(prep_time_hours, type_of_food) %>% ggplot(aes(x = prep_time_hours, y = type_of_food)) + geom_boxplot()
+```
+
+### What is the busiest hour of the day?
+```{r, message = F, warning = F}
+ggplotly(orders %>% 
+  group_by(hour_of_the_day) %>%
+  summarise(number_of_orders = n()) %>% 
+  arrange(desc(number_of_orders)) %>%
+  ggplot(aes(x = hour_of_the_day, y = number_of_orders)) +
+  geom_col(fill = 'steelblue') +
+  labs(x = 'Hour of the day',
+       y = 'Number of orders',
+       title = 'Busiest time of the day'))
+```
+
+As expected there is a rise of orders one hour after noon where people eat their lunch. As the time passes there is a downward trend till 5pm and then an upward trend till 8 pm where the peak of orders is reached having more than 6k orders overall.  
+
+### What is the busiest day?
+```{r, message = F, warning = F}
+ggplotly(orders %>% 
+  group_by(day_name) %>%
+  summarise(number_of_orders = n()) %>% 
+  arrange(desc(number_of_orders)) %>%
+  ggplot(aes(x = day_name, y = number_of_orders)) +
+  geom_col(fill = 'steelblue') +
+  labs(x = 'Day of week',
+       y = 'Number of orders',
+       title = 'Busiest day of the week'))
+```
+
+It seems that Sunday is the busiest day and Thursday the most quiet in terms of orders' frequency based on the first graph.
+
+### Estimate the 'slowest' and the 'faster' day
+```{r, message = F, warning = F}
+ggplotly(orders %>% 
+  group_by(day_name) %>%
+  summarise(median_prep_time = median(prep_time_hours), 
+            average_prep_time = mean(prep_time_hours)) %>% 
+  arrange(desc(median_prep_time)) %>%
+  ggplot(aes(x = day_name, y = median_prep_time)) +
+  geom_point(aes(color = 'median_prep_time'), size = 4) +
+  geom_point(aes(y = average_prep_time, color = 'average_prep_time'), size = 4) +
+  labs(x = 'Day of week',
+       y = 'Prep time in hours',
+       title = 'Median vs average prep time by day of the week', 
+       fill = "Dose (mg)") + 
+  theme(legend.position = "right"))
+```
+
+The graph illustrates the median and the mean preparation time for the days of the week. It seems that Tuesday is the day that on average the preparation time is faster while the slowest average and median preparation happens on Fridays. Again we see that the median is consistently less than the average prep time showing that for all days there are orders that take long to prepare.
+
+### Daily and median preparation over time?
+
+In the graph above you can see the average daily preparation time (red color) and the median daily preparation time (blue color). We observe that average values are consistently higher than median values since there are extreme values that impact the average value. For this reason we can see how the median behaves as a more robust measure that is not affected by outliers. The median preparation time is steadily around 0.21 - 0.23 hours whereas the average preparation time fluctuates heavily over time from 0.26 hours reaching the maximum of 1.56 hours on 1st July. By checking this particular day, we observed that there are only 4 observations and one of them has 5.7 hours of preparation, which explains this spike in the graph. In the modeling notebook we will remove this date for consistency as the month changes.  
+
+You can also hover your mouse over the linegraphs to check the daily values.
+```{r, message = F, warning = F}
+ggplotly(orders %>% 
+  group_by(date_of_order) %>%
+  summarise(average_time = mean(prep_time_hours), median_time = median(prep_time_hours)) %>% 
+  ggplot(aes(x = date_of_order, y = median_time)) +
+  geom_line(color = 'steelblue') +
+  geom_line(aes(y = average_time), color = 'tomato') +  
+  labs(x = 'Date',
+       y = 'Preparation time in hours',
+       title = 'Daily average vs daily median preparation time in hours')) 
+# Show the 4 cases of the last date
+orders %>% filter(date_of_order == '2015-07-01') %>% select(restaurant_id, city, type_of_food, prep_time_hours)
+```
+
+## Linear relationships between numeric variables
+
+```{r, message = F, warning = F}
+# Remove 1st July data
+orders <- orders %>% filter(date_of_order != '2015-07-01')
+# Keep the numeric variables to check linear correlation and remove time in secs and minutes
+pearson_cor_variables <- orders %>% keep(is.numeric) %>% select(-prep_time_seconds, -prep_time_minutes)
+# Create correlation table
+correlation_table <- cor(pearson_cor_variables)
+# Plot the relationships, distributions and correlation coefficients by pairs
+ggpairs(pearson_cor_variables, ggplot2::aes(alpha = 0.5))
+```
+
+As expected the higher the number of items in an order the higher the price having a moderate positive linear relationship with a coefficient of about 0.55. We would also expect higher correlation between preparation time and number of items but we have coefficient of 0.11 which shows approximately no linear relationship between the two. A very weak positive linear relationship appears between order price and prep time (0.18). The fact that there is not strong linear relationship is not necessarily bad indication as 1. we avoid the issue of multicollinearity between the predictors and 2. maybe there is another type of relationship that can help us having good predictions for our model
+
+## Conclusions
+
+* Not clear if the extreme values are orders meant to be delivered at a specific time
+* Without removing extreme values, the average prep time is 22 minutes with a median value to be 14 minutes
+* UK has more than 90% of the orders and the vast majority regard London
+* Restaurant 408 has the most orders placed having ‘chicken’ as type of food
+* Italian food is the most popular option followed by burgers and thai
+* Crepes and soups seem to be the slowest in preparation
+* Delicatessen and kosher appear the fastest in preparation
+* The busiest time of the day seems to be from 7 to 11 pm while the are very little orders before 11 am
+* The busiest day of the week is Sunday and the most quiet is Thursday
+* Meals seem to get ready faster on Fridays and slower on Tuesdays
+* Higher number of items is not correlated with higher prep time
+* The higher the number of items the higher the price
+
+
+## Things I would do if I had more time in terms of analysis
+* Proper outlier analysis to understand more about the extreme values 
+* Clustering - Profiling the different restaurants by using k-means to understand behaviour by similarities
+
+
+

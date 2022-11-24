@@ -1,0 +1,315 @@
+---
+title: "Modeling prep time of asap observations (less than 2 hours)"
+author: "Charilaos Charalampopoulos"
+date: "24/11/2022"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Process outline
+* Cleaning the data and perform feature engineering 
+* Select model's predictors
+* Remove outliers
+* Data partitioning into training and test set
+* Create 10-folds cross validation 
+* Initialize - specify two models (Liner regression and Random forest)
+* Create a workflow
+* Estimate performance using cross validation
+* Execute the models' workflow - Fit models
+* Model comparison based on RMSE (evaluation metric for regression)
+* Over-fitting check
+* Evaluation of final model
+
+### Install and load libraries
+```{r, message = F, warning = F}
+#install.packages(tidyverse)  # General purpose
+#install.packages(lubridate)  # Dates
+#install.packages(tidymodels) # Machine Learning framework
+#install.packages(ranger)     # Random forest engine
+#install.packages(plotly)     # Interactive visuals
+library(tidyverse)  # General purpose
+library(lubridate)  # Dates
+library(tidymodels) # Machine Learning framework
+library(ranger)     # Random forest engine
+library(plotly)     # Interactive visuals
+```
+
+### Load data 
+```{r, message = F, warning = F}
+# Load data
+orders <- read.csv('orders.csv')
+restaurants <- read.csv('restaurants.csv')
+```
+
+### Basic feature engineering and manual feature selection
+##### Convert the prepararation time from seconds to hours which is what we want to predict
+##### Create the same features as in the data analysis
+##### For the scope of this model we will focus on the orders that are not exceeding 2 hours of preparation explaining the reason. 
+##### Business assumption: orders with more than 2 hours or preparation are orders aimed to be delivered at a specific time later on
+##### Examples: Pizza party for tomorrow, or placing the order in the morning for tonight's dinner - these are examples that we need to know more info to predict
+##### This threshold has been chosen based on this logic: Order descending the prep times and keep the first 98.5% of observations + 1.5 times the range between the 1st and the 3rd quartiles called IQR
+##### The rule of thumb for outlier detection is to follow the above process with 3rd quartile + 1,5*IQR, but we did not want to create an ideal scenario that seems convenient for us
+##### This way we keep the prep times lasted less than 1.97 hours ~ 2 hours, 394 observations will be removed as non asap orders - around 1%
+##### We will predict prep time in hours using the restaurant_id, food type, number of items, order price, day and hour of the day
+##### Other features could be also be created but given the time I have available for this I will work only with those
+
+
+```{r, message = F, warning = F}
+# Join the data and remove dups if any
+orders <- orders %>% inner_join(restaurants, 'restaurant_id') %>% unique() 
+# Decide about extreme values
+
+# Create features and keep the columns and observations for modeling
+orders_model <- orders %>%
+  mutate(prep_time_hours = prep_time_seconds/3600,          # Preparation time in hours
+         order_placed_at = strptime(order_acknowledged_at,  # Conversion into timestamp in GMT (UK time)
+                                    "%Y-%m-%d %H:%M:%S", 
+                                    tz = "gmt"),
+         order_ready_at = strptime(order_ready_at,          # Conversion into timestamp in GMT (UK time)
+                                   "%Y-%m-%d %H:%M:%S", 
+                                   tz = "gmt"),
+         restaurant_id = as.factor(restaurant_id),          # Change data type from character to factor
+         country = as.factor(country),                      # Change data type from character to factor
+         city = as.factor(city),                            # Change data type from character to factor
+         type_of_food = as.factor(type_of_food),            # Change data type from character to factor
+         date_of_order = date(order_placed_at),             # Date that the order was acknowledged 
+         date_order_prepared = date(order_ready_at),        # Date that the order was acknowledged 
+         day_name = lubridate::wday(date_of_order, label = TRUE), # Name of the day the order has been placed
+         hour_of_the_day = as.factor(hour(order_placed_at)),# Hour of the day where the order has been placed
+         flag_diff_day = ifelse(date_of_order != date_order_prepared & prep_time_hours > 3, 
+                                'Next_day_order',           # Create a flag to differentiate between the same 
+                                'Same_day_order')           # day and next day orders
+  ) %>% # Remove extreme observations based on my business assumption explained above (1.97 jours)
+  filter(prep_time_hours < quantile(prep_time_hours, probs = 0.985) + 1.5 * IQR(prep_time_hours)) %>%
+  filter(prep_time_seconds != 0) %>%                        # keep non-zero preparation time observations  
+  filter(date_of_order != '2015-07-01') %>%                 # remove the last date that there only 4 rows
+  filter(flag_diff_day == 'Same_day_order') %>%             # Keep the same day orders
+  select(prep_time_hours,                                   # Keep this list of variables to use in our model
+         # restaurant_id, 
+         type_of_food, 
+         city, 
+         country,
+         number_of_items,
+         order_value_gbp,
+         day_name,
+         hour_of_the_day, 
+         restaurant_id)
+```
+
+### Split the data into train and test set
+##### Use stratification in order to ensure similar distribution between training and testing set
+##### Split ratio 75-25. Use 75% of data for training the model and the rest 25% is treated as unseen data to test the model
+```{r, message = F, warning = F}
+set.seed(123) # Reproducability 
+orders_split <- initial_split(orders_model, prop = 0.75, strata = prep_time_hours)
+orders_train <- training(orders_split) # Training set
+orders_test <- testing(orders_split)   # Testing set
+```
+
+### Feature engineering 
+##### On this step I define the folmula of the model using prep_time_hours as target variable
+##### One hot encoding for the categorical data meaning that I create a binary column for the different levels of each categorical variable
+##### For the less commonly represented categories, I collapse them and allocate them as other in order not to hugely increase dimensionlity 
+##### Normalize data to be at the same scale and not affected distance-based models
+```{r, message = F, warning = F}
+# Define a recipe
+# This is where the feature engineering on the training data happens
+my_recipe <-
+  recipe(prep_time_hours ~ ., data = orders_train) %>%
+  step_other(type_of_food, hour_of_the_day, country, threshold = 0.015) %>%# Collapse food types with less than 1.5% counts
+  step_other(city, restaurant_id, threshold = 0.005) %>%       # Collapse cities and restaurants with less than 0.5% counts
+  step_novel(all_nominal(), -all_outcomes()) %>% # Treat potential appearance of new level in a categorical variable         
+  step_dummy(all_nominal(), one_hot = T) %>% # One hot encoding   
+  step_zv(all_predictors()) %>% # Remove zero variance predictors
+  step_scale(all_predictors()) # Normalize data
+```
+
+### Specify a linear regression and a random forest
+```{r, message = F, warning = F}
+# Model specification - linear model
+lm_spec <-                   # your model specification
+  linear_reg() %>%           # model type - linear regression
+  set_engine(engine = "lm") %>%  # model engine
+  set_mode("regression")     # model mode
+
+# Model specification - random forest
+rf_spec <-                   # your model specification
+  rand_forest(trees = 500) %>% # random forest with 500 trees
+  set_engine("ranger") %>%   # model engine
+  set_mode("regression")     # regression task
+
+```
+
+### Create a workflow
+##### The workflow combines the model specification with preprocessing steps into a single object
+```{r, message = F, warning = F}
+# Create workflow for the linear model
+lm_wflow <-
+ workflow() %>%         # Create an empty workflow
+ add_model(lm_spec) %>% # add the model specification
+ add_recipe(my_recipe)  # add the created recipe
+
+# Create workflow for random forest
+rf_wflow <-
+ workflow() %>%
+ add_model(rf_spec) %>% 
+ add_recipe(my_recipe)
+```
+
+### Estimate performance by using 10-folds
+##### The performance metric that we pick to judge if our model is good or not is the RMSE (Root Mean Squared Error)
+##### The lowest the RMSE the better the model
+```{r, message = F, warning = F}
+# Create 10 folds cross validation with stratification
+set.seed(100) #Reproducibility
+cv_folds <- vfold_cv(orders_train, v = 10, strata = prep_time_hours, breaks = 5) 
+
+# Fit the lm model to the 10 folds of training data
+lm_wflow_eval <- 
+  lm_wflow %>% # User the created workflow for the linear model
+  fit_resamples(prep_time_hours ~ ., resamples = cv_folds) 
+# Show the linear regression performance for the 10 folders
+lm_wflow_eval %>% 
+  collect_metrics() %>%
+  select(.metric, mean, std_err) %>%
+  slice(1)
+
+# Fit rf model to the 10 folds of training data
+rf_wflow_eval <- rf_wflow %>% fit_resamples(prep_time_hours ~ ., resamples = cv_folds)
+# Show the random performance for the 10 folders
+rf_wflow_eval %>% 
+  collect_metrics() %>%
+  select(.metric, mean, std_err) %>%
+  slice(1)
+```
+The table above shows the average RMSE of the 10 folds giving us a picture of what the performance would be in the test data. 
+The RMSE score which will be our main metric for evaluating the model has almost no difference between the two models which is an indicator that the simplest model would be preferable
+
+### Execute the workflow
+##### The last_fit() function will then train the feature engineering steps on the training data, fit the model to the training data, apply the feature engineering steps to the test data, and calculate the predictions on the test data, all in one step.
+```{r, message = F, warning = F}
+# Fit the models
+linear_model <- last_fit(lm_wflow, split = orders_split)
+random_forest <- last_fit(rf_wflow, split = orders_split)
+```
+
+### Fit the models only to the training data 
+##### We do that in order to examine if the models overfit visually
+##### We then create a table with true prep time and predictions for the two different models in training and testing set
+```{r, message = F, warning = F}
+# Fit the models only to the training data
+lm_fit <- lm_spec %>% fit(prep_time_hours ~ ., data = orders_train)
+rf_fit <- rf_spec %>% fit(prep_time_hours ~ ., data = orders_train)
+## Put the training results to a table
+results_train <- lm_fit %>%
+  predict(new_data = orders_train) %>%
+  mutate(
+    truth = orders_train$prep_time_hours,
+    model = "linear model"
+  ) %>%
+  bind_rows(rf_fit %>%
+    predict(new_data = orders_train) %>%
+    mutate(
+      truth = orders_train$prep_time_hours,
+      model = "random forest"
+    )) %>% rename(predictions = .pred)
+
+## Put the testing results to a table
+# Linear model results
+lm_test_preds <- as.data.frame(
+  cbind(predictions = linear_model$.predictions[[1]]$.pred, 
+        truth = linear_model$.predictions[[1]]$prep_time_hours,
+        model = "linear model")) 
+rf_test_preds <- as.data.frame(
+  cbind(predictions = random_forest$.predictions[[1]]$.pred, 
+        truth = random_forest$.predictions[[1]]$prep_time_hours,
+        model = "random forest"))
+results_test <- as.data.frame(rbind(lm_test_preds, rf_test_preds)) %>% 
+  mutate(predictions = as.numeric(predictions),
+         truth = as.numeric(truth))
+```
+
+### Models results (RMSE) in training data 
+##### Random forest has lower RMSE (0.127) than linear model (0.183) which means it predicts better the data tha has been trained into
+```{r, message = F, warning = F}
+results_train %>%
+  group_by(model) %>%
+  rmse(truth = truth, estimate = predictions)
+```
+
+### Models results (RMSE) in testing data 
+##### For both of the models the RMSE is 0.2 
+```{r, message = F, warning = F}
+results_test %>%
+  group_by(model) %>%
+  rmse(truth = truth, estimate = predictions)
+```
+
+* We care about performance on test set
+* Models that predict accurately in the training data and not that well on the testing are ‘overfitting’ – learn too good the training data and do not generalise well 
+* Red dots represent the linear model and the blue ones the random forest 
+* The graph shows predictions on the vertical and true preparation times in the horizontal axis for the training (right) and test (left) data. 
+* Points on the right hand side of the diagonal show that the model predict 
+* The closest the points to the diagonal line the more accurate the prediction – prediction meets truth
+* Random forest seems to outperform linear model in the training predictions but not in the testing (left) which is what we care for
+* Non of the models can capture well the extreme values as you can see in the graph above
+
+```{r, message = F, warning = F}
+results_test %>%
+  mutate(train = "Testing") %>%
+  dplyr::bind_rows(results_train %>%
+    mutate(train = "Training")) %>%
+  ggplot(aes(truth, predictions, color = model)) +
+  geom_abline(lty = 2, color = "black", size = 2.4, alpha = 0.65) +
+  geom_point(alpha = 0.4) +
+  facet_wrap(~train) +
+  labs(title = 'Model comparison and overfitting check',
+    x = "Truth",
+    y = "Predicted preparation time in hours",
+    color = "Model"
+  )
+```
+
+As the results in the testing data are approx the same for the two models we will proceed with the linear model as it is faster to run,
+easier to interpret the results to business audience and seems like a more trustworthy solution as it does not overfit like the random forest does. Improvement on both of the model could be applied but this would be on the next steps.
+
+### Actual vs Predicted visulization for linear model
+```{r, message = F, warning = F}
+# Create a table with the results of the model in the test set
+results_test <- as.data.frame(rbind(lm_test_preds, rf_test_preds)) %>% 
+  mutate(predictions = as.numeric(predictions),
+         truth = as.numeric(truth))
+
+results_test %>%
+  ggplot(aes(truth, predictions)) +
+  geom_abline(lty = 2, color = "gray", size = 2) +
+  geom_point(color = 'steelblue', alpha = 0.4)  +
+  labs(title = 'Truth vs Predicted preparation time in hours',
+    x = "Truth",
+    y = "Predicted preparation time in hours"
+  )
+```
+
+### Is the RMSE good enough?
+We have achieved reasonably good results. The first indication is the visual result showing the points clustered around the vertical line.
+An RMSE of 0.2 compared to the RMSE 0.37 it is definitely an improvement that we achieved by applying the filter of 2 hours. By normalizing the RMSE which has the same unit of measurement with the target variable (hours) we take RMSE/(max value - min value) resulting to 0.1 (very close to 0) which implies a very good model based on the scale we measure.
+
+### Things I would do if I had more time
+* Proper outlier analysis to understand more about the extreme values 
+* Clustering - Profiling the different restaurants by using k-means or hierarchical clustering in order to put each group of restaurants as input to the model
+* Build more models and compare them (example: elastic net, xgboost, svm, etc)
+* Perform more feature engineering and put variables in the model to examine if they help in performance
+* Include interactions between the variables in the model
+* Interpret results in more depth by adding feature importance plots and potentially include automated feature selection
+* Spend more time on proper model and hyperparameter tuning to improve models' performance
+
+### Nexts steps and recommendations
+* Create a shiny app or a dashboard to give the chance to my audience to play around with the model's inputs and see the results (output of the estimation on how much time will the order need to be prepared based on the given predictors)
+* Create an app which takes as input the data of a new order and outputs the estimated time
+* Application development and usage of the model as a service in a production system
+* Put the model to production and enable live streaming data processing 
+* Build outlier detection machine to ensure data quality
+* If there is an app that the store inputs (flagging) whether a particular order is to be delivered ASAP or at a specific time in the future 
