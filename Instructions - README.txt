@@ -1,8 +1,8 @@
 On this repo you will find:
-1 pptx file as a presentation dedicated to the storytelling for non techincal audience.
+1 ('Presentation_meal_prep_time') pptx file as a presentation dedicated to the storytelling for non techincal audience.
 1 ('Data_analysis') R markdown (RMD format) that contains the code of the data analysis which explains the step followed along with the code and comments.
 2 ('Modeling_same_day_orders' and 'Modeling_asap_orders') R markdown (RMD format) that regard machine learning models and the corresponding code and graphs along with comments. (Two different business scenarios to train the models) 
-3 html document that have the same names as the above notebooks which include code, graphs, comments and generally the analysis as a draft report 
+3 ('Data_analysis', 'Modeling_same_day_orders' and 'Modeling_asap_orders') html document that have the same names as the above notebooks which include code, graphs, comments and generally the analysis as a draft report 
 generated from the 3 R markdowns that I mentioned above, respectivelly. You can open the html with the browser of your choice.
 
 My suggestion is to check the html documents directly to see the steps I followed in detail without 
